@@ -86,6 +86,82 @@ void insertPrePackedConv2dOp(std::shared_ptr<Graph>& graph) {
   rewriter.runOnGraph(graph);
 }
 
+// Fusing Relu with Linear/Conv already implies that relu will
+// be done inplace. However, if the input of the relu was not to be
+// overwritten then it should not be fused.
+void fuseReluWithPackedOps(std::shared_ptr<Graph>& graph) {
+
+  SubgraphRewriter rewriter;
+
+  std::string linear_prepack_run_relu_fused = R"(
+    graph(%input, %weight, %bias, %output_min_max):
+        %output_min: float = prim::Constant[value=0.0]()
+        %output_max: float = prim::Constant[value=1.0]()
+        %packed_weight_bias = prepacked::linear_clamp_prepack(
+            %weight, %bias, %output_min, %output_max)
+        %res = prepacked::linear_clamp_run(%input, %packed_weight_bias)
+        return (%res))";
+
+  std::string conv2d_prepack_run_relu_fused = R"(
+    graph(%input, %weight, %bias, %stride:int[], %padding:int[],
+          %dilation:int[], %groups:int, %output_min_max):
+        %output_min: float = prim::Constant[value=0.0]()
+        %output_max: float = prim::Constant[value=1.0]()
+        %packed_weight_bias = prepacked::conv2d_clamp_prepack(
+            %weight, %bias, %stride, %padding, %dilation, %groups,
+            %output_min, %output_max)
+        %r = prepacked::conv2d_clamp_run(%input, %packed_weight_bias)
+        return (%r) )";
+
+  std::string linear_prepack_run_relu = R"(
+    graph(%input, %weight, %bias, %output_min_max):
+        %packed_weight_bias = prepacked::linear_clamp_prepack(
+            %weight, %bias, %output_min_max, %output_min_max)
+        %linear_res = prepacked::linear_clamp_run(%input, %packed_weight_bias)
+        %res = aten::relu(%linear_res)
+        return (%res))";
+
+  rewriter.RegisterRewritePattern(linear_prepack_run_relu,
+      linear_prepack_run_relu_fused);
+
+  std::string conv2d_prepack_run_relu = R"(
+    graph(%input, %weight, %bias, %stride:int[], %padding:int[],
+          %dilation:int[], %groups:int, %output_min_max):
+        %packed_weight_bias = prepacked::conv2d_clamp_prepack(
+            %weight, %bias, %stride, %padding, %dilation, %groups,
+            %output_min_max, %output_min_max)
+        %conv2d_res = prepacked::conv2d_clamp_run(%input, %packed_weight_bias)
+        %r = aten::relu(%conv2d_res)
+        return (%r) )";
+
+  rewriter.RegisterRewritePattern(conv2d_prepack_run_relu,
+      conv2d_prepack_run_relu_fused);
+
+  std::string linear_prepack_run_relu_inplace = R"(
+    graph(%input, %weight, %bias, %output_min_max):
+        %packed_weight_bias = prepacked::linear_clamp_prepack(
+            %weight, %bias, %output_min_max, %output_min_max)
+        %linear_res = prepacked::linear_clamp_run(%input, %packed_weight_bias)
+        %res = aten::relu_(%linear_res)
+        return (%res))";
+
+  std::string conv2d_prepack_run_relu_inplace = R"(
+    graph(%input, %weight, %bias, %stride:int[], %padding:int[],
+          %dilation:int[], %groups:int, %output_min_max):
+        %packed_weight_bias = prepacked::conv2d_clamp_prepack(
+            %weight, %bias, %stride, %padding, %dilation, %groups,
+            %output_min_max, %output_min_max)
+        %conv2d_res = prepacked::conv2d_clamp_run(%input, %packed_weight_bias)
+        %r = aten::relu_(%conv2d_res)
+        return (%r) )";
+
+  rewriter.RegisterRewritePattern(linear_prepack_run_relu_inplace,
+      linear_prepack_run_relu_fused);
+  rewriter.RegisterRewritePattern(conv2d_prepack_run_relu_inplace,
+      conv2d_prepack_run_relu_fused);
+  rewriter.runOnGraph(graph);
+}
+
 } // namespace
 
 void insertPrePackedOps(std::shared_ptr<Graph>& graph) {
@@ -101,6 +177,11 @@ void insertPrePackedOps(script::Module& module) {
   for (script::Module m : module.children()) {
     insertPrePackedOps(m);
   }
+}
+
+void fusePrePackedLinearConvWithRelu(script::Module& module) {
+  auto graph = module.get_method("forward").graph();
+  fuseReluWithPackedOps(graph);
 }
 
 void FoldPrePackingOps(script::Module& m) {
@@ -128,6 +209,11 @@ void insertPrePackedOps(std::shared_ptr<Graph>& graph) {
 }
 
 void insertPrePackedOps(script::Module& module) {
+  TORCH_INTERNAL_ASSERT(
+      "XNNPACK is not enabled. Please build with USE_XNNPACK=1");
+}
+
+void fusePrePackedLinearConvWithRelu(script::Module& module) {
   TORCH_INTERNAL_ASSERT(
       "XNNPACK is not enabled. Please build with USE_XNNPACK=1");
 }
